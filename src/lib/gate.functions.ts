@@ -1,6 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { useSession } from "@tanstack/react-start/server";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+
+import { getDB } from "@/lib/db.server";
 
 type GateSession = { unlocked?: boolean };
 
@@ -48,13 +50,12 @@ export const getVaultState = createServerFn({ method: "GET" }).handler(
     const session = await useSession<GateSession>(sessionConfig());
     if (!session.data.unlocked) return { unlocked: false, ideas: [] };
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data, error } = await supabaseAdmin
-      .from("ideas")
-      .select("id, raw, efficiency, friction_killer, unit_economics, created_at")
-      .order("created_at", { ascending: false });
-    if (error) throw new Error(error.message);
-    return { unlocked: true, ideas: (data ?? []) as Idea[] };
+    const { results } = await getDB()
+      .prepare(
+        "SELECT id, raw, efficiency, friction_killer, unit_economics, created_at FROM ideas ORDER BY created_at DESC",
+      )
+      .all<Idea>();
+    return { unlocked: true, ideas: results ?? [] };
   },
 );
 
@@ -150,14 +151,21 @@ export const refineAndVault = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<Idea> => {
     await requireUnlocked();
     const refined = await refineWithAI(data.raw);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: row, error } = await supabaseAdmin
-      .from("ideas")
-      .insert({ raw: data.raw, ...refined })
-      .select("id, raw, efficiency, friction_killer, unit_economics, created_at")
-      .single();
-    if (error) throw new Error(error.message);
-    return row as Idea;
+    const idea: Idea = {
+      id: randomUUID(),
+      raw: data.raw,
+      efficiency: refined.efficiency,
+      friction_killer: refined.friction_killer,
+      unit_economics: refined.unit_economics,
+      created_at: new Date().toISOString(),
+    };
+    await getDB()
+      .prepare(
+        "INSERT INTO ideas (id, raw, efficiency, friction_killer, unit_economics, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(idea.id, idea.raw, idea.efficiency, idea.friction_killer, idea.unit_economics, idea.created_at)
+      .run();
+    return idea;
   });
 
 export const purgeIdea = createServerFn({ method: "POST" })
@@ -169,9 +177,7 @@ export const purgeIdea = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }) => {
     await requireUnlocked();
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { error } = await supabaseAdmin.from("ideas").delete().eq("id", data.id);
-    if (error) throw new Error(error.message);
+    await getDB().prepare("DELETE FROM ideas WHERE id = ?").bind(data.id).run();
     return { ok: true as const };
   });
 
