@@ -78,9 +78,7 @@ function PasscodeGate() {
       <div className="w-full max-w-xs flex flex-col items-center gap-10">
         <div className="flex flex-col items-center gap-3">
           <Lock className="h-5 w-5 text-muted-foreground" strokeWidth={1.5} />
-          <h1 className="text-xs uppercase tracking-[0.35em] text-muted-foreground">
-            Ideavault
-          </h1>
+          <h1 className="text-xs uppercase tracking-[0.35em] text-muted-foreground">Ideavault</h1>
         </div>
 
         <div className="flex gap-3 h-4 items-center">
@@ -236,9 +234,7 @@ function IdeaCard({
   return (
     <li className="border border-border rounded-md p-5 bg-card">
       <div className="flex items-center justify-between gap-4 mb-4">
-        <time className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
-          {ts}
-        </time>
+        <time className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">{ts}</time>
         <button
           type="button"
           onClick={onPurge}

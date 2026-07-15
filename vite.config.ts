@@ -13,14 +13,10 @@ export default defineConfig({
     server: { entry: "server" },
   },
   nitro: {
-    // Keep in sync with `compatibility_date` in wrangler.jsonc.
-    compatibilityDate: "2026-07-15",
     cloudflare: {
-      // Node.js API shims (needed for node:crypto in gate.functions.ts).
-      nodeCompat: true,
-      // We maintain a single, explicit wrangler.jsonc at the project root
-      // (with the D1 binding, migrations dir, etc.) instead of letting Nitro
-      // generate its own wrangler.json inside the build output.
+      // The deployment config lives at the project root (copy
+      // wrangler.jsonc.example and supply the real D1 database ID), rather
+      // than being generated into the build output by Nitro.
       deployConfig: false,
     },
   },

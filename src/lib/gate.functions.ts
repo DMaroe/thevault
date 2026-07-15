@@ -1,8 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
-import { useSession } from "@tanstack/react-start/server";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { getRequest, useSession } from "@tanstack/react-start/server";
 
-import { getDB } from "@/lib/db.server";
+import { getDB, getRequiredEnv } from "@/lib/db";
 
 type GateSession = { unlocked?: boolean };
 
@@ -16,28 +15,41 @@ type Idea = {
 };
 
 function sessionConfig() {
-  const password = process.env.SESSION_SECRET;
-  if (!password) throw new Error("SESSION_SECRET is not set");
+  const request = getRequest();
+  const secure = request != null && new URL(request.url).protocol === "https:";
   return {
-    password,
+    password: getRequiredEnv("SESSION_SECRET"),
     name: "ideavault_gate",
     maxAge: 60 * 60 * 24 * 7,
     cookie: {
       httpOnly: true,
-      secure: true,
-      sameSite: "none" as const,
+      // `lax` is sufficient for this same-origin app and allows the passcode
+      // gate to work in local Wrangler development over HTTP.
+      secure,
+      sameSite: "lax" as const,
       path: "/",
     },
   };
 }
 
-function passwordMatches(input: string, expected: string) {
-  const a = createHash("sha256").update(input, "utf8").digest();
-  const b = createHash("sha256").update(expected, "utf8").digest();
-  return timingSafeEqual(a, b);
+async function passwordMatches(input: string, expected: string) {
+  const encoder = new TextEncoder();
+  const [inputHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(input)),
+    crypto.subtle.digest("SHA-256", encoder.encode(expected)),
+  ]);
+  const a = new Uint8Array(inputHash);
+  const b = new Uint8Array(expectedHash);
+  let difference = a.length ^ b.length;
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    difference |= (a[index] ?? 0) ^ (b[index] ?? 0);
+  }
+  return difference === 0;
 }
 
-async function requireUnlocked() {
+async function useUnlockedSession() {
+  // This is TanStack Start's request-session helper, not a React hook.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   const session = await useSession<GateSession>(sessionConfig());
   if (!session.data.unlocked) {
     throw new Error("LOCKED");
@@ -60,16 +72,18 @@ export const getVaultState = createServerFn({ method: "GET" }).handler(
 );
 
 export const unlockSite = createServerFn({ method: "POST" })
-  .inputValidator((data: { password: string }) => {
-    if (typeof data?.password !== "string" || data.password.length === 0 || data.password.length > 128) {
+  .validator((data: { password: string }) => {
+    if (
+      typeof data?.password !== "string" ||
+      data.password.length === 0 ||
+      data.password.length > 128
+    ) {
       throw new Error("Invalid input");
     }
     return data;
   })
   .handler(async ({ data }) => {
-    const expected = process.env.SITE_PASSWORD;
-    if (!expected) throw new Error("SITE_PASSWORD is not set");
-    if (!passwordMatches(data.password, expected)) {
+    if (!(await passwordMatches(data.password, getRequiredEnv("SITE_PASSWORD")))) {
       return { ok: false as const };
     }
     const session = await useSession<GateSession>(sessionConfig());
@@ -96,34 +110,59 @@ async function refineWithAI(raw: string): Promise<{
   friction_killer: string;
   unit_economics: string;
 }> {
-  const key = process.env.LOVABLE_API_KEY;
-  if (!key) throw new Error("LOVABLE_API_KEY is not set");
+  const key = getRequiredEnv("OPENAI_API_KEY");
 
-  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+  const res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Lovable-API-Key": key,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
-      model: "google/gemini-3-flash-preview",
-      messages: [
+      model: "gpt-4o-mini",
+      store: false,
+      input: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: `Raw venture concept:\n\n${raw}\n\nReturn JSON now.` },
       ],
-      response_format: { type: "json_object" },
+      text: {
+        format: {
+          type: "json_schema",
+          name: "idea_refinement",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              efficiency: { type: "string" },
+              friction_killer: { type: "string" },
+              unit_economics: { type: "string" },
+            },
+            required: ["efficiency", "friction_killer", "unit_economics"],
+          },
+        },
+      },
     }),
   });
 
   if (!res.ok) {
     const body = await res.text();
     if (res.status === 429) throw new Error("Rate limited — try again shortly.");
-    if (res.status === 402) throw new Error("AI credits exhausted. Add credits in workspace billing.");
+    if (res.status === 401) throw new Error("OpenAI API key is invalid or missing.");
+    if (res.status === 402) throw new Error("OpenAI API credits are exhausted.");
     throw new Error(`AI request failed [${res.status}]: ${body.slice(0, 200)}`);
   }
 
-  const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  const content = json.choices?.[0]?.message?.content ?? "";
+  const json = (await res.json()) as {
+    output_text?: string;
+    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  };
+  const content =
+    json.output_text ??
+    json.output
+      ?.flatMap((output) => output.content ?? [])
+      .find((part) => part.type === "output_text")?.text ??
+    "";
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(content);
@@ -141,7 +180,7 @@ async function refineWithAI(raw: string): Promise<{
 }
 
 export const refineAndVault = createServerFn({ method: "POST" })
-  .inputValidator((data: { raw: string }) => {
+  .validator((data: { raw: string }) => {
     if (typeof data?.raw !== "string") throw new Error("Invalid input");
     const raw = data.raw.trim();
     if (raw.length < 8) throw new Error("Idea too short — give it more substance.");
@@ -149,10 +188,10 @@ export const refineAndVault = createServerFn({ method: "POST" })
     return { raw };
   })
   .handler(async ({ data }): Promise<Idea> => {
-    await requireUnlocked();
+    await useUnlockedSession();
     const refined = await refineWithAI(data.raw);
     const idea: Idea = {
-      id: randomUUID(),
+      id: crypto.randomUUID(),
       raw: data.raw,
       efficiency: refined.efficiency,
       friction_killer: refined.friction_killer,
@@ -163,20 +202,27 @@ export const refineAndVault = createServerFn({ method: "POST" })
       .prepare(
         "INSERT INTO ideas (id, raw, efficiency, friction_killer, unit_economics, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .bind(idea.id, idea.raw, idea.efficiency, idea.friction_killer, idea.unit_economics, idea.created_at)
+      .bind(
+        idea.id,
+        idea.raw,
+        idea.efficiency,
+        idea.friction_killer,
+        idea.unit_economics,
+        idea.created_at,
+      )
       .run();
     return idea;
   });
 
 export const purgeIdea = createServerFn({ method: "POST" })
-  .inputValidator((data: { id: string }) => {
+  .validator((data: { id: string }) => {
     if (typeof data?.id !== "string" || !/^[0-9a-f-]{36}$/i.test(data.id)) {
       throw new Error("Invalid id");
     }
     return data;
   })
   .handler(async ({ data }) => {
-    await requireUnlocked();
+    await useUnlockedSession();
     await getDB().prepare("DELETE FROM ideas WHERE id = ?").bind(data.id).run();
     return { ok: true as const };
   });

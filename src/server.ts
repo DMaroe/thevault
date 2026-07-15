@@ -1,6 +1,7 @@
 import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
+import type { WorkerEnv } from "./lib/db";
 import { renderErrorPage } from "./lib/error-page";
 
 type ServerEntry = {
@@ -45,8 +46,11 @@ function isH3SwallowedErrorBody(body: string): boolean {
 }
 
 export default {
-  async fetch(request: Request, env: unknown, ctx: unknown) {
+  async fetch(request: Request, env: WorkerEnv, ctx: unknown) {
     try {
+      // TanStack/Nitro makes bindings available to server functions through this
+      // request-scoped Worker environment reference.
+      globalThis.__env__ = env;
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "thevault",
+  "main": ".output/server/index.mjs",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".output/public",
+  },
+  "no_bundle": true,
+  "rules": [
+    {
+      "type": "ESModule",
+      "globs": ["**/*.mjs", "**/*.js"],
+    },
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "thevault-db",
+      "database_id": "180703d1-552b-4690-91a6-bb4fecab4448",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "secrets": {
+    "required": ["SESSION_SECRET", "SITE_PASSWORD", "OPENAI_API_KEY"],
+  },
+}
